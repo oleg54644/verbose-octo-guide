@@ -1,0 +1,97 @@
+name: Build APK
+
+# Сборка APK мессенджера на серверах GitHub (бесплатно, без установки чего-либо).
+# Запуск: вкладка Actions -> Build APK -> Run workflow, либо обычный push в main.
+# Готовый файл: внизу страницы запуска, раздел Artifacts -> messenger-debug-apk.
+#
+# Почему ubuntu-22.04: на ней проверенно собирается python-for-android v2024.01.21.
+# (До апреля 2027 эта версия runner'а ещё поддерживается GitHub.)
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Получить исходники
+        uses: actions/checkout@v4
+
+      - name: Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Системные зависимости
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git zip unzip autoconf libtool pkg-config \
+            zlib1g-dev libncurses-dev libtinfo-dev libffi-dev libssl-dev \
+            libltdl-dev fonts-dejavu-core ccache
+          echo "JAVA_HOME=$JAVA_HOME"
+
+      - name: Python-зависимости
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install "buildozer==1.5.0" "cython==0.29.36"
+
+      - name: Кэш сборки (.buildozer)
+        uses: actions/cache@v4
+        with:
+          path: |
+            .buildozer
+            ~/.cache/pip
+          key: buildozer-v2-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+
+      - name: Подготовка (шрифт с кириллицей, данные сервера не нужны)
+        run: |
+          if [ ! -f Arial-Regular.ttf ]; then
+            cp /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf Arial-Regular.ttf
+          fi
+          ls -l Arial-Regular.ttf icon.png buildozer.spec main.py audio_android.py
+
+      - name: Проверка синтаксиса Python
+        run: python -m py_compile main.py audio_android.py server.py
+
+      - name: Сборка APK
+        run: |
+          # лицензии SDK принимает android.accept_sdk_license = True в buildozer.spec
+          set +e
+          buildozer -v android debug > build.log 2>&1
+          status=$?
+          if [ $status -ne 0 ]; then
+            grep -n -i -E "error|failed|traceback" build.log | tail -n 40
+            exit $status
+          fi
+          tail -n 60 build.log
+
+      - name: Лог сборки при ошибке
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Проверка результата
+        run: |
+          ls -la bin/
+          test -n "$(ls bin/*.apk)" || { echo "APK не создан"; exit 1; }
+
+      - name: Загрузить APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: messenger-debug-apk
+          path: bin/*.apk
+          if-no-files-found: error
